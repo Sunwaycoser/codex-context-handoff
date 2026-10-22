@@ -1,0 +1,15 @@
+# local state / archives — never commit personal handoff data
+.codex-handoffs/
+state.json
+hook.log
+*.tmp
+
+# python
+__pycache__/
+*.pyc
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

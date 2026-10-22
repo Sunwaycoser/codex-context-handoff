@@ -1,0 +1,27 @@
+{
+  "name": "codex-context-handoff",
+  "version": "0.1.0",
+  "description": "Token-threshold session handoff for Codex: generate a structured, evidence-based handoff document and archive the old session before native auto-compact loses context.",
+  "author": {
+    "name": "Sunwaycoser",
+    "url": "https://github.com/Sunwaycoser"
+  },
+  "homepage": "https://github.com/Sunwaycoser/codex-context-handoff",
+  "repository": "https://github.com/Sunwaycoser/codex-context-handoff",
+  "license": "MIT",
+  "keywords": ["codex", "handoff", "context", "compaction", "session", "memory"],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Codex Context Handoff",
+    "shortDescription": "阈值触发的会话交接，替代原生 auto-compact",
+    "longDescription": "上下文达到 token 阈值（默认 200k）时，由 agent 生成 11 节结构化交接文档并归档旧会话，新会话凭文档接手，避免原生压缩丢关键信息、避免超长上下文的双倍计费。",
+    "developerName": "Sunwaycoser",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "交接：保存当前会话进度，生成新会话可接手的交接文档",
+      "Continue from the handoff document."
+    ]
+  }
+}
