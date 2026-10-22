@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/context_check.py\"",
+            "command_windows": "python \"${env:PLUGIN_ROOT}\\scripts\\context_check.py\"",
+            "timeout": 60,
+            "statusMessage": "codex-context-handoff: checking context usage"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/context_check.py\"",
+            "command_windows": "python \"${env:PLUGIN_ROOT}\\scripts\\context_check.py\"",
+            "timeout": 20,
+            "statusMessage": "codex-context-handoff: saving handoff before compaction"
+          }
+        ]
+      }
+    ]
+  }
+}

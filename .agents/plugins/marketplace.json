@@ -1,0 +1,20 @@
+{
+  "name": "codex-context-handoff",
+  "interface": {
+    "displayName": "Codex Context Handoff"
+  },
+  "plugins": [
+    {
+      "name": "codex-context-handoff",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-context-handoff"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
