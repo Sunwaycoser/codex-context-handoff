@@ -85,6 +85,20 @@ class TestEstimate(unittest.TestCase):
         tokens, source = lib.estimate_tokens("/nonexistent/x.jsonl")
         self.assertEqual((tokens, source), (0, "missing"))
 
+    def test_compaction_outliers_do_not_underread(self):
+        """After compaction the tail can contain small outliers; the max
+        of the recent values must win over a single stale small one."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rollout.jsonl"
+            lines = [json.dumps({"usage": {"input_tokens": v}})
+                     for v in (218194, 218194, 30800, 34457, 42234)]
+            p.write_text("\n".join(lines) + "\n")
+            tokens, source = lib.estimate_tokens(str(p))
+            self.assertEqual(source, "usage(input)")
+            # last 3 are 30800/34457/42234 -> max 42234 (post-compaction
+            # truth), not the stale 218194 and not the single small 30800
+            self.assertEqual(tokens, 42234)
+
 
 class TestClassify(unittest.TestCase):
     def setUp(self):
@@ -280,16 +294,41 @@ class TestHandoffIntent(unittest.TestCase):
             None, '{"cwd": "D:\\\\projects\\\\codex-context-handoff"}'))
         self.assertTrue(lib.is_handoff_intent(None, '{"x": "hand off"}'))
 
-    def test_detect_completion_marker(self):
-        self.assertTrue(lib.detect_handoff_completion(
-            '{"tool_input": {"path": "docs/CODEX_HANDOFF.md"}}'))
+    def test_detect_completion_requires_tool_call_write(self):
+        # real handoff: a tool-call event that writes the document
+        self.assertTrue(lib.detect_handoff_completion(json.dumps({
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call", "name": "apply_patch",
+                        "input": "*** Add File: docs/CODEX_HANDOFF.md"}})))
+        # field regression 1: memory-index keyword listing
+        self.assertFalse(lib.detect_handoff_completion(
+            "- Codex handoff: `codex-handoff`, `CODEX_HANDOFF.md`, "
+            "`84-formula-fix`"))
+        # field regression 2: Codex's own compaction summary QUOTES the
+        # earlier tool call — it must not count as a new handoff
+        self.assertFalse(lib.detect_handoff_completion(json.dumps({
+            "type": "compacted",
+            "payload": {"message": "summary: applied patch *** Add File: "
+                                  "docs/CODEX_HANDOFF.md"}})))
         self.assertFalse(lib.detect_handoff_completion(
             '{"content": "just a normal message"}'))
-        # our own injected messages must NOT trigger completion
+        # our own injected messages must never trigger completion
         self.assertFalse(lib.detect_handoff_completion(
             lib.hard_pause_message(200000, {"threshold_tokens": 200000})))
-        self.assertFalse(lib.detect_handoff_completion(
-            lib.precompact_message(200000, {})))
+
+    def test_count_handoff_writes(self):
+        text = "\n".join([
+            "- memory index: `CODEX_HANDOFF.md`",
+            json.dumps({"type": "compacted", "payload": {
+                "message": "*** Add File: docs/CODEX_HANDOFF.md"}}),
+            json.dumps({"type": "response_item", "payload": {
+                "type": "custom_tool_call", "name": "apply_patch",
+                "input": "*** Add File: docs/CODEX_HANDOFF.md"}}),
+            json.dumps({"type": "response_item", "payload": {
+                "type": "custom_tool_call", "name": "apply_patch",
+                "input": "*** Update File: docs/CODEX_HANDOFF.md"}}),
+        ])
+        self.assertEqual(lib.count_handoff_writes(text), 2)
 
 
 if __name__ == "__main__":

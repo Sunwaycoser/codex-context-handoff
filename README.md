@@ -106,6 +106,7 @@ python3 ~/.codex/codex-context-handoff/doctor.py   # Windows: python ...
 | `hard_block` | `false` | **硬提醒开关**：到阈值强制模型转述警告并暂停（见下） |
 | `notify` | `true` | 到阈值弹**模态提醒框**：Windows 用进程内 ctypes MessageBox（不派生任何子进程，火绒等安全软件无的放矢），macOS/Linux 走系统通知。会阻塞到你点确定（hook 超时 60s 封顶） |
 | `context_window_tokens` | `0` | 模型上下文窗口；设置后有效阈值自动封顶为窗口的 75%，**保证赶在 Codex 自动压缩（约 78%）之前触发** |
+| `handoff_reopen_ratio` | `1.2` | 交接后重新开始提醒的门槛（相对阈值；有 handoff 记录时以交接时 token 数为基准） |
 | `handoff_root` | `~/.codex-handoffs` | 归档目录 + 状态文件 |
 | `project_handoff_path` | `docs/CODEX_HANDOFF.md` | 项目内交接文档路径 |
 | `max_history` | `5` | 文档内保留的交接历史条数 |
@@ -130,6 +131,14 @@ python3 ~/.codex/codex-context-handoff/doctor.py   # Windows: python ...
 为什么不拦消息（exit 2）？实测过：Codex 桌面版会静默吞掉拦截理由，
 用户只看到消息消失、不知道发生了什么，比不拦更糟。所以硬提醒走
 「模型转述 + 模态框」双通道，可见性由模态框保底。
+
+**交接完成如何判定？** 只认「写动作」——rollout 里出现 `apply_patch` /
+`Write` 等写工具且载荷包含 `CODEX_HANDOFF` 才算交接完成；文档里**提到**
+这个文件名（比如记忆索引、关键词列表）不算。早期版本只看字符串出现，
+结果被一段记忆索引误判，会话被静默了一整天。
+
+**交接后还会提醒吗？** 会——交接不是永久静音。以交接时的 token 数为基准，
+再长出「阈值 20%」的新内容就重新开始提醒（`handoff_reopen_ratio` 控制）。
 
 ## 和自动压缩赛跑
 

@@ -50,6 +50,7 @@ if (-not (Test-Path $Cfg)) {
   "hard_block": false,
   "notify": true,
   "context_window_tokens": 0,
+  "handoff_reopen_ratio": 1.2,
   "handoff_root": "~/.codex-handoffs",
   "project_handoff_path": "docs/CODEX_HANDOFF.md",
   "max_history": 5

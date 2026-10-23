@@ -99,23 +99,43 @@ def main() -> int:
         # ---------------- UserPromptSubmit ----------------
         state = lib.read_state(config)
         rec = state.setdefault("sessions", {}).setdefault(session_id, {})
+        threshold = lib.effective_threshold(config)
 
-        # auto-detect a completed handoff: the rollout contains
-        # docs/CODEX_HANDOFF.md only after the skill actually wrote it.
-        # Once seen, this session stops being nagged entirely.
-        if not rec.get("handoff_at") and \
-                lib.detect_handoff_completion(lib.read_rollout_tail(transcript)):
+        # auto-detect a completed handoff: count WRITE actions that
+        # produced a CODEX_HANDOFF document. Counting (not a boolean)
+        # lets a later handoff re-arm the detector, while the same old
+        # markers never re-fire.
+        writes = lib.count_handoff_writes(lib.read_rollout_tail(transcript))
+        if writes > int(rec.get("handoff_writes", 0)):
+            rec["handoff_writes"] = writes
+            rec["handoff_tokens"] = tokens
             lib.mark_handoff(state, session_id)
             lib.write_state(config, state)
             log(config, f"handoff-detected session={session_id} "
-                        f"tokens={tokens}")
+                        f"tokens={tokens} writes={writes}")
+
+        # a handoff is not a permanent mute: once the session has grown
+        # meaningfully PAST the handoff point (20% of the threshold of new
+        # content), start nagging again. Measured against the context at
+        # handoff time, not the bare threshold — otherwise a handoff at
+        # 1.5x threshold would immediately re-open.
+        if rec.get("handoff_at") and threshold > 0:
+            base = rec.get("handoff_tokens")
+            reopen_at = (int(base) + threshold * 0.2) if base \
+                else threshold * float(config.get("handoff_reopen_ratio", 1.2))
+            if tokens >= reopen_at:
+                rec.pop("handoff_at", None)
+                rec.pop("handoff_tokens", None)
+                lib.write_state(config, state)
+                log(config, f"handoff-reopen session={session_id} "
+                            f"tokens={tokens} reopen_at={int(reopen_at)}")
 
         # never nag someone who is asking for a handoff right now
         handoff_intent = lib.is_handoff_intent(
             lib.extract_prompt_text(payload), raw)
         if handoff_intent:
             log(config, f"handoff-intent session={session_id} "
-                        f"tokens={tokens} (suppressed)")
+                        f"tokens={tokens} level={level} (suppressed)")
             return 0
 
         # hard mode: force a visible relay-and-pause on every message
@@ -131,17 +151,16 @@ def main() -> int:
             print(lib.hard_pause_message(tokens, config))
             sys.stdout.flush()  # survive a timeout kill during the box
             notify(config,
-                   f"上下文已达 {lib.effective_threshold(config)} "
+                   f"上下文已达 {threshold} "
                    f"tokens 交接阈值。\n请说 hand off 保存进度并开新会话"
                    f"接手；点确定可继续当前工作。\n\n"
-                   f"Context reached the "
-                   f"{lib.effective_threshold(config)} handoff "
+                   f"Context reached the {threshold} handoff "
                    f"threshold. Say 'hand off' to save progress; "
                    f"click OK to continue working.")
             rec["hard_paused_at"] = datetime.now(timezone.utc).isoformat()
             lib.write_state(config, state)
             log(config, f"hard-pause session={session_id} "
-                        f"tokens={tokens} source={source}")
+                        f"tokens={tokens} threshold={threshold} source={source}")
             return 0
 
         # soft path: inject a reminder as context (never after a handoff)
@@ -162,6 +181,12 @@ def main() -> int:
             lib.write_state(config, state)
             log(config, f"{event} session={session_id} tokens={tokens} "
                         f"level={level} source={source} notified")
+            return 0
+
+        # quiet run: always log one line, so diagnosis never has to guess
+        # whether the hook ran at all
+        log(config, f"{event} session={session_id} tokens={tokens} "
+                    f"level={level} threshold={threshold} quiet")
         return 0
     except Exception as exc:  # fail-open: a broken hook must never break Codex
         try:

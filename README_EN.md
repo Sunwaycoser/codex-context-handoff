@@ -103,6 +103,7 @@ python3 ~/.codex/codex-context-handoff/doctor.py
 | `hard_block` | `false` | **hard-reminder switch**: force the model to relay the warning and pause |
 | `notify` | `true` | modal alert box at the threshold: in-process ctypes MessageBox on Windows (spawns NOTHING — Huorong-style AV cannot intercept it), native notification on macOS/Linux. Blocks until dismissed (60s hook timeout caps the worst case) |
 | `context_window_tokens` | `0` | model context window; caps the effective threshold at 75% of it so we always fire BEFORE Codex auto-compacts (~78%) |
+| `handoff_reopen_ratio` | `1.2` | when to start nagging again after a handoff (relative to the threshold; measured from the token count at handoff time when known) |
 | `handoff_root` | `~/.codex-handoffs` | archive dir + state file |
 | `project_handoff_path` | `docs/CODEX_HANDOFF.md` | in-repo handoff doc |
 | `max_history` | `5` | bounded history entries in the doc |
@@ -116,6 +117,17 @@ Three channels, light to heavy:
 3. **Modal alert box** (`notify: true`, default): at the threshold a box you MUST dismiss appears — completely independent of the model. Even if the model plays dead, you see it. Windows uses an in-process ctypes MessageBox: it spawns no subprocess, so Huorong's "hidden PowerShell execution" protection has nothing to intercept (field-tested: a hidden powershell toast gets killed by Huorong and never renders; msg.exe does not exist on Home editions). macOS/Linux use native notifications. The box blocks the current message until dismissed, capped by the 60s hook timeout — on timeout the message proceeds; the reminder has already done its job.
 
 Why not block the message (exit 2)? Field-tested: Codex Desktop silently swallows exit-2 reasons — the user just sees their message vanish with no explanation, which is worse than no block. Hard mode therefore uses two channels: model relay (best effort) + modal box (guaranteed visible).
+
+**How is a completed handoff detected?** Only by a real write action: a
+rollout line with `apply_patch` / `Write` whose payload contains
+`CODEX_HANDOFF`. Merely *mentioning* the filename (a memory index, a
+keyword list) does not count — an early substring check misfired on a
+memory index and muted a session for a full day.
+
+**Does it keep nagging after a handoff?** Yes — a handoff is not a
+permanent mute. Measured from the token count at handoff time, another
+20% of the threshold worth of new content re-arms the reminders
+(`handoff_reopen_ratio`).
 
 ## Racing auto-compaction
 

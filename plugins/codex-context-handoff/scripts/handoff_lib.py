@@ -43,6 +43,9 @@ DEFAULT_CONFIG = {
     # capped at 75% of it so we always fire BEFORE Codex auto-compacts
     # (~78% of the window). 0 disables the cap.
     "context_window_tokens": 0,
+    # after a handoff, re-open nagging once context grows past
+    # threshold * this ratio (a handoff is not a permanent mute)
+    "handoff_reopen_ratio": 1.2,
     # where handoff snapshots + logs live
     "handoff_root": "~/.codex-handoffs",
     # in-project handoff document (relative to cwd)
@@ -110,17 +113,23 @@ def _scan_usage(text: str) -> tuple:
       * ``total_token_usage`` — cumulative session counters that keep
         growing even after compaction (NOT the context size).
 
-    Returns (last per-call input_tokens, max cumulative total).
+    Compaction rewrites the tail and can leave a few small outliers
+    (e.g. 218k, 218k, 30k, 34k, 42k), so a single "last value" read is
+    unreliable: take the max of the last few per-call values instead.
+
+    Returns (context estimate, max cumulative total).
     """
-    acc = [0, 0]  # last_input, max_total
+    per_call: list = []
+    max_total = 0
 
     def walk(node) -> None:
+        nonlocal max_total
         if isinstance(node, dict):
-            per_call = node.get("usage")
-            if isinstance(per_call, dict):
-                inp = per_call.get("input_tokens")
+            usage = node.get("usage")
+            if isinstance(usage, dict):
+                inp = usage.get("input_tokens")
                 if isinstance(inp, (int, float)) and inp > 0:
-                    acc[0] = int(inp)  # last one wins
+                    per_call.append(int(inp))
             cumulative = node.get("total_token_usage")
             if not isinstance(cumulative, dict):
                 info = node.get("info")
@@ -129,7 +138,7 @@ def _scan_usage(text: str) -> tuple:
             if isinstance(cumulative, dict):
                 total = cumulative.get("total_tokens")
                 if isinstance(total, (int, float)) and total > 0:
-                    acc[1] = max(acc[1], int(total))
+                    max_total = max(max_total, int(total))
             for val in node.values():
                 walk(val)
         elif isinstance(node, list):
@@ -144,7 +153,8 @@ def _scan_usage(text: str) -> tuple:
             walk(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return acc[0], acc[1]
+    recent = per_call[-3:]
+    return (max(recent) if recent else 0), max_total
 
 
 def estimate_tokens(path: str | None) -> tuple:
@@ -225,14 +235,55 @@ def is_handoff_intent(prompt_text: str | None, raw: str = "") -> bool:
 
 
 def detect_handoff_completion(text: str) -> bool:
-    """True when the rollout proves a handoff document was written.
+    """True only when a WRITE action targeting CODEX_HANDOFF appears.
 
-    Marker: the literal CODEX_HANDOFF (docs/CODEX_HANDOFF.md) only shows
-    up in the rollout when the skill actually created the file — never
-    from our own injected messages. Once seen, the session is marked
-    handed-off and hard mode stops nagging it.
+    Field lesson: a bare substring check was a disaster — a memory index
+    line listing ``CODEX_HANDOFF.md`` as a keyword silently marked the
+    session as handed-off and muted every future reminder. A real
+    handoff always shows up as a write call (apply_patch / Write /
+    create_file) whose payload contains the path, so require both on
+    the same line.
     """
-    return "CODEX_HANDOFF" in text
+    return count_handoff_writes(text) > 0
+
+
+_WRITE_MARKERS = ("apply_patch", "*** add file", "*** update file",
+                  '"write"', '"write_file"', "create_file", '"edit_file"')
+_TOOL_CALL_TYPES = {"custom_tool_call", "function_call", "tool_call",
+                    "local_shell_call"}
+
+
+def count_handoff_writes(text: str) -> int:
+    """Number of real tool calls that wrote a CODEX_HANDOFF document.
+
+    Two field failures shaped this:
+      1. a memory-index line listing ``CODEX_HANDOFF.md`` as a keyword;
+      2. Codex's own ``compacted`` summary, which QUOTES earlier tool
+         calls (``*** Add File: docs/CODEX_HANDOFF.md``) and therefore
+         looks exactly like a write.
+
+    So: only count parsed tool-call events whose payload mentions both
+    the document and a write marker. Summaries and plain text never count.
+    """
+    count = 0
+    for line in text.splitlines():
+        if "CODEX_HANDOFF" not in line:
+            continue
+        try:
+            node = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(node, dict):
+            continue
+        payload = node.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        event_type = str(payload.get("type") or node.get("type") or "")
+        if event_type not in _TOOL_CALL_TYPES:
+            continue
+        low = line.lower()
+        if any(marker in low for marker in _WRITE_MARKERS):
+            count += 1
+    return count
 
 
 def read_rollout_tail(path: str | None) -> str:

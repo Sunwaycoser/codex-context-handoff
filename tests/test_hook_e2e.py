@@ -195,8 +195,11 @@ class HardPauseE2ETest(unittest.TestCase):
         session handed-off; no more pause injections."""
         make_rollout(self.rollout, 1500)
         with open(self.rollout, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"tool_input": {
-                "path": "docs/CODEX_HANDOFF.md"}}) + "\n")
+            fh.write(json.dumps({
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "apply_patch",
+                            "input": "*** Add File: docs/CODEX_HANDOFF.md"}}
+            ) + "\n")
         proc = self.run_hook(self.payload(prompt="继续干别的"))
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout.strip(), "")
@@ -204,6 +207,33 @@ class HardPauseE2ETest(unittest.TestCase):
                            .read_text(encoding="utf-8"))
         self.assertIn("handoff_at",
                       state["sessions"]["sess-hard-0001"])
+
+    def test_memory_index_mention_does_not_mute(self):
+        """Field regression: a memory-index line mentioning the filename
+        silently muted the session for a whole day."""
+        make_rollout(self.rollout, 1500)
+        with open(self.rollout, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"content": "- memory: `codex-handoff`, "
+                                            "`CODEX_HANDOFF.md`"}) + "\n")
+        proc = self.run_hook(self.payload(prompt="我们出的题目是纯coding类吗"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("交接阈值", proc.stdout)  # still nags
+
+    def test_reopen_after_growth(self):
+        """A handoff is not a permanent mute: past 1.2x the threshold the
+        session starts being nagged again."""
+        make_rollout(self.rollout, 1500)  # 1.5x of 1000
+        state = {"sessions": {"sess-hard-0001":
+                              {"handoff_at": "2026-10-23T00:00:00",
+                               "handoff_writes": 0}}}
+        (self.state_root).mkdir(parents=True, exist_ok=True)
+        (self.state_root / "state.json").write_text(json.dumps(state))
+        proc = self.run_hook(self.payload(prompt="继续干活"))
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("交接阈值", proc.stdout)  # reopened
+        after = json.loads((self.state_root / "state.json")
+                           .read_text(encoding="utf-8"))
+        self.assertNotIn("handoff_at", after["sessions"]["sess-hard-0001"])
 
     def test_below_threshold_silent(self):
         make_rollout(self.rollout, 500)
