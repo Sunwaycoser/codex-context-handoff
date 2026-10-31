@@ -44,8 +44,13 @@ if [ ! -f "$CODEX_HOME/codex-handoff.json" ]; then
   "warn_ratio": 0.8,
   "cooldown_minutes": 10,
   "hard_block": false,
+  "hard_block_cooldown_minutes": 30,
   "notify": true,
+  "notify_session_label": true,
+  "notify_session_label_chars": 10,
   "context_window_tokens": 0,
+  "threshold_ratio": 0.75,
+  "handoff_reopen_ratio": 1.2,
   "handoff_root": "~/.codex-handoffs",
   "project_handoff_path": "docs/CODEX_HANDOFF.md",
   "max_history": 5
@@ -95,3 +100,11 @@ echo "    1. Restart Codex."
 echo "    2. Open /hooks and TRUST the new hooks (untrusted hooks never run)."
 echo "    3. Run:  python3 \"$SCRIPTS_DST/doctor.py\""
 echo "    4. In any session, say 'hand off' to test the skill."
+
+# 5. WorkBuddy side (optional — only when its data dir exists)
+if [ -d "$HOME/.workbuddy-ai" ]; then
+  echo
+  echo "==> WorkBuddy"
+  python3 "$REPO_ROOT/tools/install_workbuddy.py" || \
+    echo "    (WorkBuddy install skipped: python3 failed)"
+fi

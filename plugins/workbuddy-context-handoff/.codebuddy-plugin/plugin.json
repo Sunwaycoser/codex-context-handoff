@@ -1,0 +1,15 @@
+{
+  "name": "workbuddy-context-handoff",
+  "version": "0.1.0",
+  "description": "上下文阈值交接（WorkBuddy 版）：接近窗口上限时提醒并生成结构化交接文档，替代有损压缩。",
+  "author": {
+    "name": "Sunwaycoser"
+  },
+  "keywords": [
+    "handoff",
+    "context",
+    "compaction"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "defaultEnabled": true
+}
