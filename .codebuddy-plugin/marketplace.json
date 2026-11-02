@@ -1,0 +1,11 @@
+{
+  "name": "codex-context-handoff",
+  "description": "上下文交接插件市场：Codex / WorkBuddy 双宿主（本文件供 WorkBuddy 识别）",
+  "plugins": [
+    {
+      "name": "workbuddy-context-handoff",
+      "source": "./plugins/workbuddy-context-handoff",
+      "description": "WorkBuddy 侧上下文阈值交接：读 workbuddy.db 的 session_usage，阈值提醒 + 结构化交接文档。"
+    }
+  ]
+}

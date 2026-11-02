@@ -48,8 +48,13 @@ if (-not (Test-Path $Cfg)) {
   "warn_ratio": 0.8,
   "cooldown_minutes": 10,
   "hard_block": false,
+  "hard_block_cooldown_minutes": 30,
   "notify": true,
+  "notify_session_label": true,
+  "notify_session_label_chars": 10,
   "context_window_tokens": 0,
+  "threshold_ratio": 0.75,
+  "handoff_reopen_ratio": 1.2,
   "handoff_root": "~/.codex-handoffs",
   "project_handoff_path": "docs/CODEX_HANDOFF.md",
   "max_history": 5
@@ -101,3 +106,10 @@ Write-Host "    1. Restart Codex."
 Write-Host "    2. Open /hooks and TRUST the new hooks (untrusted hooks never run)."
 Write-Host "    3. Run:  python `"$ScriptsDst\doctor.py`""
 Write-Host "    4. In any session, say 'hand off' to test the skill."
+
+# 5. WorkBuddy side (optional — only when its data dir exists)
+if (Test-Path (Join-Path $HOME ".workbuddy-ai")) {
+    Write-Host ""
+    Write-Host "==> WorkBuddy"
+    python (Join-Path $PSScriptRoot "tools\install_workbuddy.py")
+}

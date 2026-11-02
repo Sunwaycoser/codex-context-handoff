@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CODEBUDDY_PLUGIN_ROOT}/scripts/context_check.py\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CODEBUDDY_PLUGIN_ROOT}/scripts/context_check.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

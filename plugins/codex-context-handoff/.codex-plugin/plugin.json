@@ -9,7 +9,14 @@
   "homepage": "https://github.com/Sunwaycoser/codex-context-handoff",
   "repository": "https://github.com/Sunwaycoser/codex-context-handoff",
   "license": "MIT",
-  "keywords": ["codex", "handoff", "context", "compaction", "session", "memory"],
+  "keywords": [
+    "codex",
+    "handoff",
+    "context",
+    "compaction",
+    "session",
+    "memory"
+  ],
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "interface": {
@@ -18,10 +25,14 @@
     "longDescription": "上下文达到 token 阈值（默认 200k）时，由 agent 生成 11 节结构化交接文档并归档旧会话，新会话凭文档接手，避免原生压缩丢关键信息、避免超长上下文的双倍计费。",
     "developerName": "Sunwaycoser",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "交接：保存当前会话进度，生成新会话可接手的交接文档",
       "Continue from the handoff document."
     ]
-  }
+  },
+  "longDescription": "上下文达到交接阈值（窗口 × 比例：Codex 75%、WorkBuddy 80%；读不到窗口时默认 200k）时，由 agent 生成 11 节结构化交接文档并归档旧会话，新会话凭文档接手，避免原生压缩丢关键信息、避免超长上下文的双倍计费。"
 }

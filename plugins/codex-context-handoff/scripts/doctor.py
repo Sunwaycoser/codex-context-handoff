@@ -36,7 +36,11 @@ def main() -> int:
                      if p and Path(os.path.expanduser(p)).is_file()), None)
     lines.append(check("config", True,
                        cfg_file or "defaults (no config file)"))
-    lines.append(f"       threshold={config['threshold_tokens']} tokens, "
+    effective = lib.effective_threshold(config)
+    window = int(config.get("context_window_tokens") or 0)
+    how = (f"窗口 {window} × {config.get('threshold_ratio', 0.75)}"
+           if window > 0 else "兜底绝对值（rollout 里读到窗口时会自动覆盖）")
+    lines.append(f"       threshold={effective} tokens（{how}）, "
                  f"warn_ratio={config['warn_ratio']}, "
                  f"enabled={config['enabled']}, "
                  f"hard_block={config.get('hard_block', False)}")
