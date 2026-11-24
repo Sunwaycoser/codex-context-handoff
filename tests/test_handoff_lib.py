@@ -486,6 +486,30 @@ class TestExecWrappedHandoffWrite(unittest.TestCase):
             "cat > docs/README.md <<EOF\nsee CODEX_HANDOFF.md\nEOF")), 0)
 
 
+class TestMessageWording(unittest.TestCase):
+    """2026-11-24 回归：软提醒（threshold / warn / precompact）曾各自
+    写死旧句式，把阈值写在「当前用量」的位置，用户核对状态栏时以为
+    数字算错。三个消息必须与弹窗同口径：各自标明当前/阈值/窗口。"""
+
+    CFG = {"threshold_ratio": 0.75, "context_window_tokens": 475000,
+           "warn_ratio": 0.8}
+
+    def test_all_messages_show_labeled_numbers(self):
+        for msg in (lib.warn_message(400000, self.CFG),
+                    lib.threshold_message(400000, self.CFG),
+                    lib.precompact_message(400000, self.CFG)):
+            self.assertIn("当前 400,000", msg, msg)
+            self.assertIn("阈值 356,250", msg, msg)
+            self.assertIn("窗口 475,000", msg, msg)
+
+    def test_no_old_misleading_phrasing(self):
+        for msg in (lib.warn_message(400000, self.CFG),
+                    lib.threshold_message(400000, self.CFG),
+                    lib.precompact_message(400000, self.CFG)):
+            self.assertNotIn("已达交接阈值 ~", msg, msg)
+            self.assertNotIn("约 400000 tokens（阈值", msg, msg)
+
+
 class TestUsageFacts(unittest.TestCase):
     """A：弹窗文案必须同时显示当前/阈值/窗口，且各自标明身份。"""
 
@@ -519,9 +543,18 @@ class TestUsageFacts(unittest.TestCase):
         msg = lib.hard_pause_message(416612, self.cfg)
         self.assertNotIn(f"已达 {356250} 交接阈值", msg)
 
+    def test_usage_line_honors_threshold_cap(self):
+        """终审抓到的文案矛盾：cap 生效时中文行用未 cap 的阈值、
+        英文行用 cap 后的阈值，同一弹窗两个数字打架。usage_line
+        必须接受 cap，与 classify / 局部变量 threshold 同口径。"""
+        capped = lib.usage_line(200000, self.cfg, threshold_cap=190000)
+        self.assertIn("阈值 190,000", capped)
+        self.assertNotIn("阈值 356,250", capped)
+        self.assertIn("已达阈值的 105%", capped)  # 200000/190000
+
 
 class TestSessionLabel(unittest.TestCase):
-    """C：弹窗标题带侧栏会话名 + 短 ID；过长只留前 10 字。"""
+    """C：弹窗标题带侧栏会话名 + 短 ID；名字过长截断到 24 字。"""
 
     def setUp(self):
         self.cfg = {}
@@ -530,23 +563,22 @@ class TestSessionLabel(unittest.TestCase):
         self.assertEqual(
             lib.session_label(self.cfg, "a1b2c3d4-1111-2222-3333-444455556666",
                              "工作会话"),
-            "工作会话 (a1b2c3d4)")
+            "工作会话 (a1b2c3d4-111)")
 
-    def test_long_name_truncated_to_10(self):
+    def test_long_name_truncated_to_24(self):
         long = "这是之前会话的继续。请先阅读 D:\\SW\\GaoJingV7\\docs"
         got = lib.session_label(
             self.cfg, "a1b2c3d4-xxxx-xxxx-xxxx-xxxxxxxxxxxx", long)
         name, _, sid = got.partition(" (")
-        # 只留前 10 个字（不含省略号），绝不整句打印
-        self.assertEqual(name.rstrip("…"), long[:10])
-        self.assertEqual(sid, "a1b2c3d4)")
-        # 原来整句是 24 字，截断后名字部分不超过 11（10 字 + 省略号）
-        self.assertLessEqual(len(name), 11)
+        # 只留前 24 个字（不含省略号），绝不整句打印
+        self.assertEqual(name.rstrip("…"), long[:24])
+        self.assertEqual(sid, "a1b2c3d4-xxx)")
+        self.assertLessEqual(len(name), 25)
 
     def test_no_name_only_short_id(self):
         self.assertEqual(
             lib.session_label(self.cfg, "a1b2c3d4-xxxx-xxxx-xxxx-xxxxxxxxxxxx", ""),
-            "(a1b2c3d4)")
+            "(a1b2c3d4-xxx)")
 
     def test_unknown_yields_empty(self):  # 不污染弹窗标题
         self.assertEqual(lib.session_label(self.cfg, "unknown", ""), "")
@@ -555,7 +587,7 @@ class TestSessionLabel(unittest.TestCase):
         self.assertEqual(
             lib.notify_title(self.cfg, "a1b2c3d4-1111-2222-3333-444455556666",
                             "工作会话"),
-            "codex-context-handoff — 工作会话 (a1b2c3d4)")
+            "codex-context-handoff — 工作会话 (a1b2c3d4-111)")
 
 
 class TestShouldHardPause(unittest.TestCase):

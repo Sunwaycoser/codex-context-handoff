@@ -115,155 +115,143 @@ def main() -> int:
         if window > 0:
             config = dict(config, context_window_tokens=window)
 
-        state = lib.read_state(config)
-        rec = state.setdefault("sessions", {}).setdefault(session_id, {})
-        threshold = lib.effective_threshold(config)
-
-        # 实测压缩点封顶（2026-10-31 教训）：标称 876K 窗口的模型实际在
-        # 212K 就压缩了——Codex 的自动压缩并不跟随标称窗口，875900×0.75
-        # 的阈值画到了永远到不了的高度，提醒完全失效。上次实测压缩点
-        # × 0.9 才是可靠上限。
-        last_compact = int(rec.get("last_compact_tokens") or 0)
-        threshold_cap = int(last_compact * 0.9) if last_compact > 0 else 0
-        # cap 必须传给 classify：它才是真正决定提醒与否的判断，
-        # 局部变量 threshold 只进日志和文案（审核抓到的失效 bug）
-        level = lib.classify(tokens, config, threshold_cap=threshold_cap)
-        if threshold_cap and threshold_cap < threshold:
-            threshold = threshold_cap
         # 侧栏上的会话名（如「工作会话」），弹窗标题用；取不到就是空串
         thread_name = lib.read_thread_name(session_id)
 
-        if event == "PreCompact":
-            # Last line of defence: compaction is about to destroy context.
-            # Context injection only — never a blocking box here (it would
-            # stall the compaction flow).
-            state = lib.read_state(config)
+        # 所有对 state 的读-改-写都在同一把进程锁内完成；
+        # notify/print/log 一律先记账、出锁后再执行（ctypes MessageBox
+        # 会阻塞到用户点确定，绝不能占着锁）
+        pending_log = ""
+        pending_print = ""
+        pending_notify = None
+
+        with lib.state_transaction(config) as state:
             rec = state.setdefault("sessions", {}).setdefault(session_id, {})
-            handed_off = bool(rec.get("handoff_at"))
-            # ① 记录实测压缩点：下一轮用它给阈值封顶（标称窗口不可信）
-            if tokens > int(rec.get("last_compact_tokens") or 0):
-                rec["last_compact_tokens"] = tokens
-            # ② 压缩即失忆：上下文马上被销毁，交接标记与冷却全部失效，
-            #    否则压缩后的新上下文会被旧的 handoff_at 静音到底
-            #    （2026-10-31 实测：handed_off=True 导致三次压缩全程无声）
-            rec.pop("handoff_at", None)
-            rec.pop("handoff_tokens", None)
-            rec.pop("hard_paused_at", None)
-            rec["last_level"] = lib.LEVEL_QUIET
-            rec.pop("last_notified", None)
-            # writes 计数也清零：压缩摘要会「引用」历史工具调用，而压缩后
-            # estimate_tokens 只看得到压缩后的小上下文——旧计数仍在时，一
-            # 条新的真实写入可能被误判成多次；反之清零后第一次写入就能
-            # 正确地重新标记 handoff。
-            rec.pop("handoff_writes", None)
-            lib.write_state(config, state)
-            if not handed_off and config.get("enabled", True):
-                print(lib.precompact_message(tokens, config))
-            log(config, f"PreCompact session={session_id} tokens={tokens} "
-                        f"source={source} handed_off={handed_off} "
-                        f"last_compact_tokens={rec['last_compact_tokens']} "
-                        f"state-reset=1")
-            return 0
+            threshold = lib.effective_threshold(config)
 
-        # ---------------- UserPromptSubmit ----------------
-        state = lib.read_state(config)
-        rec = state.setdefault("sessions", {}).setdefault(session_id, {})
-        threshold = lib.effective_threshold(config)
+            # 实测压缩点封顶（2026-10-31 教训）：标称 876K 窗口的模型实际在
+            # 212K 就压缩了——Codex 的自动压缩并不跟随标称窗口，875900×0.75
+            # 的阈值画到了永远到不了的高度，提醒完全失效。上次实测压缩点
+            # × 0.9 才是可靠上限。
+            last_compact = int(rec.get("last_compact_tokens") or 0)
+            threshold_cap = int(last_compact * 0.9) if last_compact > 0 else 0
+            # cap 必须传给 classify：它才是真正决定提醒与否的判断，
+            # 局部变量 threshold 只进日志和文案（审核抓到的失效 bug）
+            level = lib.classify(tokens, config, threshold_cap=threshold_cap)
+            if threshold_cap and threshold_cap < threshold:
+                threshold = threshold_cap
 
-        # auto-detect a completed handoff: count WRITE actions that
-        # produced a CODEX_HANDOFF document. Counting (not a boolean)
-        # lets a later handoff re-arm the detector, while the same old
-        # markers never re-fire.
-        writes = lib.count_handoff_writes(tail_text)
-        if writes > int(rec.get("handoff_writes", 0)):
-            rec["handoff_writes"] = writes
-            rec["handoff_tokens"] = tokens
-            lib.mark_handoff(state, session_id)
-            lib.write_state(config, state)
-            log(config, f"handoff-detected session={session_id} "
-                        f"tokens={tokens} writes={writes}")
-
-        # a handoff is not a permanent mute: once the session has grown
-        # meaningfully PAST the handoff point (20% of the threshold of new
-        # content), start nagging again. Measured against the context at
-        # handoff time, not the bare threshold — otherwise a handoff at
-        # 1.5x threshold would immediately re-open.
-        if rec.get("handoff_at") and threshold > 0:
-            base = rec.get("handoff_tokens")
-            reopen_at = (int(base) + threshold * 0.2) if base \
-                else threshold * float(config.get("handoff_reopen_ratio", 1.2))
-            if tokens >= reopen_at:
+            if event == "PreCompact":
+                # Last line of defence: compaction is about to destroy context.
+                # Context injection only — never a blocking box here.
+                handed_off = bool(rec.get("handoff_at"))
+                # ① 记录实测压缩点：下一轮用它给阈值封顶（标称窗口不可信）
+                if tokens > int(rec.get("last_compact_tokens") or 0):
+                    rec["last_compact_tokens"] = tokens
+                # ② 压缩即失忆：上下文马上被销毁，交接标记与冷却全部失效
                 rec.pop("handoff_at", None)
                 rec.pop("handoff_tokens", None)
-                lib.write_state(config, state)
-                log(config, f"handoff-reopen session={session_id} "
+                rec.pop("hard_paused_at", None)
+                rec["last_level"] = lib.LEVEL_QUIET
+                rec.pop("last_notified", None)
+                # writes 计数清零：压缩摘要会引用历史工具调用
+                rec.pop("handoff_writes", None)
+                if not handed_off and config.get("enabled", True):
+                    pending_print = lib.precompact_message(tokens, config)
+                pending_log = (
+                    f"PreCompact session={session_id} tokens={tokens} "
+                    f"source={source} handed_off={handed_off} "
+                    f"last_compact_tokens={rec['last_compact_tokens']} "
+                    f"state-reset=1")
+
+            else:  # ---------------- UserPromptSubmit ----------------
+                # auto-detect a completed handoff: count WRITE actions that
+                # produced a handoff document.
+                writes = lib.count_handoff_writes(tail_text)
+                if writes > int(rec.get("handoff_writes", 0)):
+                    rec["handoff_writes"] = writes
+                    rec["handoff_tokens"] = tokens
+                    lib.mark_handoff(state, session_id)
+                    pending_log = (
+                        f"handoff-detected session={session_id} "
+                        f"tokens={tokens} writes={writes}")
+
+                # a handoff is not a permanent mute
+                if not pending_log and rec.get("handoff_at") and threshold > 0:
+                    base = rec.get("handoff_tokens")
+                    reopen_at = (int(base) + threshold * 0.2) if base \
+                        else threshold * float(
+                            config.get("handoff_reopen_ratio", 1.2))
+                    if tokens >= reopen_at:
+                        rec.pop("handoff_at", None)
+                        rec.pop("handoff_tokens", None)
+                        pending_log = (
+                            f"handoff-reopen session={session_id} "
                             f"tokens={tokens} reopen_at={int(reopen_at)}")
 
-        # never nag someone who is asking for a handoff right now
-        handoff_intent = lib.is_handoff_intent(
-            lib.extract_prompt_text(payload), raw)
-        if handoff_intent:
-            log(config, f"handoff-intent session={session_id} "
-                        f"tokens={tokens} level={level} (suppressed)")
-            return 0
+                handoff_intent = lib.is_handoff_intent(
+                    lib.extract_prompt_text(payload), raw)
+                if handoff_intent:
+                    pending_log = (f"handoff-intent session={session_id} "
+                                   f"tokens={tokens} level={level} (suppressed)")
 
-        # hard mode: force a visible relay-and-pause at the threshold.
-        # 冷却（hard_block_cooldown_minutes）：原来是「每条消息都弹」，
-        # 实测三分钟连弹三次。现在同一会话在冷却窗口内只弹一次；冷却
-        # 期间仍然注入文字提醒（模型仍会转述），只是不再打断用户。
-        if (config.get("hard_block") and level == lib.LEVEL_THRESHOLD
-                and config.get("enabled", True)
-                and not rec.get("handoff_at")):
-            pause_due = lib.should_hard_pause(state, session_id, config)
-            label = lib.session_label(config, session_id, thread_name)
-            # 冷却打点 + 日志必须在 notify() *之前*：ctypes MessageBox 会
-            # 阻塞到用户点确定，hook 60s 超时会被杀掉——用户切走不点框
-            # 是最常见的场景，那时如果还没落盘，下一条消息立刻再弹，冷却
-            # 等于没有。
-            if pause_due:
-                lib.mark_hard_paused(state, session_id)
-                lib.write_state(config, state)
-            log(config, f"hard-pause session={session_id} name={label!r} "
+                elif (config.get("hard_block")
+                      and level == lib.LEVEL_THRESHOLD
+                      and config.get("enabled", True)
+                      and not rec.get("handoff_at")):
+                    # 硬提醒：冷却期内仍注入文字，但不再弹框
+                    pause_due = lib.should_hard_pause(state, session_id, config)
+                    label = lib.session_label(config, session_id, thread_name)
+                    # 冷却打点在事务内完成（出锁前已落盘）——ctypes
+                    # MessageBox 阻塞到用户点确定，hook 60s 超时会被杀掉
+                    if pause_due:
+                        lib.mark_hard_paused(state, session_id)
+                    pending_log = (
+                        f"hard-pause session={session_id} name={label!r} "
                         f"tokens={tokens} threshold={threshold} "
-                        f"source={source} popup={'yes' if pause_due else 'cooldown'}")
-            print(lib.hard_pause_message(tokens, config))
+                        f"source={source} popup="
+                        f"{'yes' if pause_due else 'cooldown'}")
+                    pending_print = lib.hard_pause_message(tokens, config)
+                    if pause_due:
+                        pending_notify = (
+                            f"{lib.usage_line(tokens, config, threshold_cap)}\n\n"
+                            f"已达交接阈值。请说 hand off 保存进度并开新会话"
+                            f"接手；点确定可继续当前工作。\n\n"
+                            f"Context reached the {threshold} handoff "
+                            f"threshold (now {tokens:,}). Say 'hand off' to "
+                            f"save progress; click OK to continue working.")
+
+                elif (not rec.get("handoff_at")
+                      and lib.should_notify(state, session_id, level, config)):
+                    if level == lib.LEVEL_THRESHOLD:
+                        pending_print = lib.threshold_message(tokens, config)
+                        pending_notify = (
+                            f"{lib.usage_line(tokens, config, threshold_cap)}\n\n"
+                            f"已达交接阈值，建议尽快 hand off。\n\n"
+                            f"Context reached the {threshold} handoff "
+                            f"threshold (now {tokens:,}). Consider "
+                            f"'hand off' soon.")
+                    elif level == lib.LEVEL_WARN:
+                        pending_print = lib.warn_message(tokens, config)
+                    lib.mark_notified(state, session_id, level)
+                    pending_log = (f"{event} session={session_id} "
+                                   f"tokens={tokens} level={level} "
+                                   f"source={source} notified")
+
+                if not pending_log:
+                    # quiet run: always log one line, so diagnosis never has
+                    # to guess whether the hook ran at all
+                    pending_log = (f"{event} session={session_id} "
+                                   f"tokens={tokens} level={level} "
+                                   f"threshold={threshold} quiet")
+
+        # ---- 锁外 emit：写回已由事务 finally 完成 ----
+        log(config, pending_log)
+        if pending_print:
+            print(pending_print)
             sys.stdout.flush()
-            if pause_due:
-                notify(config,
-                       f"{lib.usage_line(tokens, config)}\n\n"
-                       f"已达交接阈值。请说 hand off 保存进度并开新会话"
-                       f"接手；点确定可继续当前工作。\n\n"
-                       f"Context reached the {threshold} handoff threshold "
-                       f"(now {tokens:,}). Say 'hand off' to save progress; "
-                       f"click OK to continue working.",
-                       session_id, thread_name)
-            return 0
-
-        # soft path: inject a reminder as context (never after a handoff)
-        if (not rec.get("handoff_at")
-                and lib.should_notify(state, session_id, level, config)):
-            if level == lib.LEVEL_THRESHOLD:
-                print(lib.threshold_message(tokens, config))
-                sys.stdout.flush()
-                notify(config,
-                       f"{lib.usage_line(tokens, config)}\n\n"
-                       f"已达交接阈值，建议尽快 hand off。\n\n"
-                       f"Context reached the {lib.effective_threshold(config)} "
-                       f"handoff threshold (now {tokens:,}). Consider "
-                       f"'hand off' soon.",
-                       session_id, thread_name)
-            elif level == lib.LEVEL_WARN:
-                print(lib.warn_message(tokens, config))
-            lib.mark_notified(state, session_id, level)
-            lib.write_state(config, state)
-            log(config, f"{event} session={session_id} tokens={tokens} "
-                        f"level={level} source={source} notified")
-            return 0
-
-        # quiet run: always log one line, so diagnosis never has to guess
-        # whether the hook ran at all
-        log(config, f"{event} session={session_id} tokens={tokens} "
-                    f"level={level} threshold={threshold} quiet")
+        if pending_notify is not None:
+            notify(config, pending_notify, session_id, thread_name)
         return 0
     except Exception as exc:  # fail-open: a broken hook must never break Codex
         try:

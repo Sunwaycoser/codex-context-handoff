@@ -39,9 +39,10 @@ DEFAULT_CONFIG = {
     # 硬提醒冷却：同会话 30 分钟内只弹一次（原「每条都弹」实测 3 分钟弹 3 次）
     "hard_block_cooldown_minutes": 30,
     "notify": True,
-    # 用户可见提示里带上侧栏会话名 + 短 ID（会话名超 10 字截断）
+    # 用户可见提示里带上侧栏会话名 + 短 ID（会话名超 24 字截断）
     "notify_session_label": True,
-    "notify_session_label_chars": 10,
+    "notify_session_label_chars": 24,
+    "notify_session_label_id_chars": 12,
     "context_window_tokens": 0,
     # WorkBuddy 默认 0.8（撞硬限制 ≈100% 才被动压缩，20% 余量安全）；
     # Codex 侧默认 0.75（实测 84–87% 就主动压缩，余量要更大）

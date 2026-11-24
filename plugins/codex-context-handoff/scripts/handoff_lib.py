@@ -19,6 +19,9 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,8 +44,9 @@ DEFAULT_CONFIG = {
     # 弹窗里带上会话名与短 ID（多人/多分支并行时能看出是哪条会话）
     "notify_session_label": True,
     # 会话名最多显示几个字（超出截断加省略号）。侧栏会话名可能很长，
-    # 弹窗标题放不下——用户要求只留前 10 个字。
-    "notify_session_label_chars": 10,
+    # 弹窗标题放不下——用户要求只留前 24 个字。
+    "notify_session_label_chars": 24,
+    "notify_session_label_id_chars": 12,
     # native desktop notification at threshold / before compaction
     "notify": True,
     # 已知窗口大小时，实际阈值 = 窗口 × 此比例。
@@ -604,6 +608,8 @@ def _state_path(config: dict) -> Path:
 
 
 def read_state(config: dict) -> dict:
+    """读 state。读失败返回空 state——调用方若用 state_transaction，
+    会因为 read_ok=False 跳过写回，不会把空 state 覆盖到磁盘。"""
     p = _state_path(config)
     try:
         return json.loads(p.read_text(encoding="utf-8-sig"))
@@ -612,11 +618,130 @@ def read_state(config: dict) -> dict:
 
 
 def write_state(config: dict, state: dict) -> None:
+    """原子写 state。唯一 tmp 文件名避免并发进程互相截断同一个 .tmp。"""
     p = _state_path(config)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(p)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# ---- 跨进程 state 事务 ----------------------------------------------------
+
+class _StateLock:
+    """跨平台进程锁：用**目录锁**（mkdir 原子）——Windows 的 msvcrt
+    文件锁在「首次创建锁文件」时有竞态（多个进程同时打开空文件、
+    各自补字节再 seek(0)，会锁在不同 inode / 内容上），实测第一轮
+    就会漏。mkdir 在 Windows/POSIX 都是原子的，语义一致且无 fd 坑。
+
+    所有异常都吞掉——锁失败必须 fail-open，绝不挂 hook。
+    """
+
+    STALE_SECONDS = 60  # hook 被 60s 超时杀掉后留下的锁目录视为过期
+
+    def __init__(self, path: Path, timeout: float = 2.0):
+        # path 是 state.lock 文件路径 → 锁目录用 state.lock.d
+        self.dir = path.with_name(path.name + ".d")
+        self.timeout = timeout
+        self.acquired = False
+
+    def _clear_if_stale(self) -> None:
+        """清掉被杀进程留下的锁目录（mtime 超过 60s）。正常临界区是
+        毫秒级，60s 仍存在必然是进程被杀，不是别的进程正在工作。"""
+        try:
+            age = time.time() - self.dir.stat().st_mtime
+            if age > self.STALE_SECONDS:
+                self.dir.rmdir()
+        except OSError:
+            pass  # 别人刚拿到锁/目录非空，交给下一轮 loop 处理
+
+    def acquire(self) -> bool:
+        try:
+            self.dir.parent.mkdir(parents=True, exist_ok=True)
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    self.dir.mkdir()  # 原子：创建成功即拿到锁
+                    self.acquired = True
+                    return True
+                except FileExistsError:
+                    self._clear_if_stale()
+                    if time.monotonic() >= deadline:
+                        return False
+                    time.sleep(0.05)
+        except Exception:
+            self.acquired = False
+        return self.acquired
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            self.dir.rmdir()
+        except OSError:
+            pass
+        finally:
+            self.acquired = False
+
+
+@contextmanager
+def state_transaction(config: dict, timeout: float = 2.0,
+                      _settle: float = 0.0):
+    """跨进程互斥地读-改-写 state.json。
+
+    契约（调用方必须遵守，否则前功尽弃）：
+      * yield 出的 state 只许 mutate，不许 rebind；
+      * with 块内**只允许纯内存操作**——禁止 notify/print/log/DB/任何 I/O；
+      * 需要弹框/输出的内容在块内算好，块外再 emit。
+
+    读失败（文件坏/被占用）时跳过写回，绝不把空 state 覆盖到磁盘；
+    拿不到锁时同样跳过写（fail-open 的语义是「不阻塞宿主」，不是「必须落盘」）。
+    `_settle` 仅供测试注入延时，让并发重叠成为必然。
+    """
+    p = _state_path(config)
+    lock = _StateLock(p.with_suffix(".lock"), timeout)
+    acquired = lock.acquire()
+    read_ok = True
+    try:
+        # 一次读搞定：文件不存在 → 空 state（首次运行，允许写）；
+        # 文件存在但 JSON 坏 → read_ok=False，事务跳过写回
+        # （绝不能再读第二次——多进程下第二次读会撞上别人的 replace，
+        #  误判成 read_ok=False 而跳过写，这正是并发丢计数的真凶）
+        if p.exists():
+            try:
+                raw = p.read_text(encoding="utf-8-sig")
+                if not raw.strip():
+                    read_ok = False
+                    state = {"sessions": {}}
+                else:
+                    state = json.loads(raw)
+            except (OSError, json.JSONDecodeError):
+                read_ok = False
+                state = {"sessions": {}}
+        else:
+            state = {"sessions": {}}
+        before = json.dumps(state, sort_keys=True, ensure_ascii=False)
+        try:
+            yield state
+        finally:
+            after = json.dumps(state, sort_keys=True, ensure_ascii=False)
+            dirty = after != before
+            if _settle:
+                time.sleep(_settle)  # 测试用：模拟临界区内耗时，放大竞争
+            if dirty and read_ok and acquired:
+                try:
+                    write_state(config, state)
+                except Exception:
+                    pass
+    finally:
+        lock.release()
 
 
 def should_notify(state: dict, session_id: str, level: str,
@@ -705,14 +830,20 @@ def mark_hard_paused(state: dict, session_id: str,
     rec["hard_paused_at"] = now.isoformat()
 
 
-def usage_facts(tokens: int, config: dict) -> dict:
+def usage_facts(tokens: int, config: dict, threshold_cap: int = 0) -> dict:
     """把「当前用量 / 阈值 / 窗口 / 百分比」算成一组可复用的数字。
 
     存在的理由：旧弹窗把 *阈值* 写在「上下文已达 X tokens」的句子里，
     用户看到 356250 会以为那是当前用量，再对上状态栏的 417014 就成了
     「算错了」。三个数字必须各自标明身份。
+
+    threshold_cap：与 classify 同一个 cap（实测压缩点 × 0.9）。传了就
+    用封顶后的阈值算百分比，避免中文行说 656,250、英文行说 190,000
+    这种自相矛盾。
     """
     threshold = effective_threshold(config)
+    if threshold_cap > 0:
+        threshold = min(threshold, threshold_cap) or threshold
     try:
         window = int(config.get("context_window_tokens") or 0)
     except (TypeError, ValueError):
@@ -728,13 +859,9 @@ def usage_facts(tokens: int, config: dict) -> dict:
     }
 
 
-def usage_line(tokens: int, config: dict) -> str:
-    """一行说清三个数字：当前 / 阈值 / 窗口。
-
-    百分比要写成「已达阈值的 117%」而不是「阈值 117%」——后者会被读成
-    「阈值等于 117%」，又是一处歧义。
-    """
-    f = usage_facts(tokens, config)
+def usage_line(tokens: int, config: dict, threshold_cap: int = 0) -> str:
+    """一行说清三个数字：当前 / 阈值 / 窗口。threshold_cap 见 usage_facts。"""
+    f = usage_facts(tokens, config, threshold_cap)
     line = f"当前 {f['tokens']:,} / 阈值 {f['threshold']:,} tokens"
     line += f"（已达阈值的 {f['pct_threshold']}%"
     if f["window"]:
@@ -753,19 +880,23 @@ def session_label(config: dict, session_id: str = "",
 
     名字可能很长（未命名的会话，thread_name 就是首条提示的截断版，
     如「这是之前会话的继续。请先阅读 D:\\...」），弹窗标题放不下：
-    只留前 10 个字加省略号。
+    只留前 24 个字加省略号（弹窗空间够；可用配置调）。
     """
     if not config.get("notify_session_label", True):
         return ""
     try:
-        limit = int(config.get("notify_session_label_chars", 10))
+        limit = int(config.get("notify_session_label_chars", 24))
     except (TypeError, ValueError):
-        limit = 10
+        limit = 24
+    try:
+        id_chars = int(config.get("notify_session_label_id_chars", 12))
+    except (TypeError, ValueError):
+        id_chars = 12
     name = re.sub(r"\s+", " ", str(thread_name or "").strip())
     if limit > 0 and len(name) > limit:
         name = name[:limit].rstrip() + "…"
     sid = str(session_id or "").strip()
-    short = sid[:8] if sid and sid != "unknown" else ""
+    short = sid[:id_chars] if sid and sid != "unknown" else ""
     parts = [p for p in (name, f"({short})" if short else "") if p]
     return " ".join(parts)
 
@@ -842,6 +973,10 @@ def native_notify(title: str, body: str) -> bool:
     Windows: in-process modal box (no subprocess). macOS/Linux: native
     notification service, fire-and-forget.
     """
+    # 测试环境：环境变量置 1 时不弹真框，只记日志返回成功——
+    # 否则 e2e 测试进程会卡在 MessageBox 等用户点确定。
+    if os.environ.get("HANDOFF_NO_POPUP") == "1":
+        return True
     if sys.platform.startswith("win"):
         return _win_message_box(title, body)
     cmd = build_notify_command(title, body)
@@ -863,33 +998,37 @@ def native_notify(title: str, body: str) -> bool:
 
 
 def warn_message(tokens: int, config: dict) -> str:
-    threshold = effective_threshold(config)
-    pct = round(100.0 * tokens / threshold) if threshold else 0
+    # 统一用 usage_line：当前/阈值/窗口三数各自标明身份。旧文案
+    # 「上下文约 X tokens（阈值 Y 的 Z%）」把估算值和阈值挤在一起，
+    # 用户核对状态栏时仍容易读成数字算错。
     return (
-        f"[codex-context-handoff] 上下文约 {tokens} tokens（阈值 {threshold} 的 "
-        f"{pct}%），接近交接线。方便时说「交接 / hand off」保存进度，或继续当前工作。\n"
-        f"Context at ~{tokens} tokens ({pct}% of {threshold}). Consider "
-        f"'hand off' to save progress, or continue working."
+        f"[codex-context-handoff] {usage_line(tokens, config)}"
+        f"，接近交接线。方便时说「交接 / hand off」保存进度，或继续当前工作。\n"
+        f"Context at {usage_line(tokens, config)}. Consider 'hand off' to "
+        f"save progress, or continue working."
     )
 
 
 def threshold_message(tokens: int, config: dict) -> str:
-    threshold = effective_threshold(config)
+    # 2026-11-24 修：旧文案「上下文已达交接阈值 ~{tokens} >= {threshold}」
+    # 把阈值写在「当前用量」的位置——用户核对状态栏时以为是统计错误。
+    # 与 hard_pause_message / 弹窗统一口径。
     return (
-        f"[codex-context-handoff] 上下文已达交接阈值 ~{tokens} >= {threshold} "
-        f"tokens。请在回答本轮前执行 $codex-handoff（write 模式）保存进度。\n"
-        f"Context reached the handoff threshold (~{tokens} >= {threshold}). "
+        f"[codex-context-handoff] 上下文已超交接阈值："
+        f"{usage_line(tokens, config)}。请在回答本轮前执行 "
+        f"$codex-handoff（write 模式）保存进度。\n"
+        f"Context reached the handoff threshold: {usage_line(tokens, config)}. "
         f"Run $codex-handoff (write mode) before answering."
     )
 
 
 def precompact_message(tokens: int, config: dict) -> str:
     return (
-        f"[codex-context-handoff] 宿主即将自动压缩本会话（约 {tokens} "
-        f"tokens）。若尚未交接，立即执行 $codex-handoff；已无法产出高质量文档时，"
-        f"至少执行 $codex-handoff dump 兜底。\n"
-        f"Auto-compact imminent (~{tokens} tokens). Run $codex-handoff now, "
-        f"or $codex-handoff dump as the last resort."
+        f"[codex-context-handoff] 宿主即将自动压缩本会话"
+        f"（{usage_line(tokens, config)}）。若尚未交接，立即执行 $codex-handoff；"
+        f"已无法产出高质量文档时，至少执行 $codex-handoff dump 兜底。\n"
+        f"Auto-compact imminent ({usage_line(tokens, config)}). "
+        f"Run $codex-handoff now, or $codex-handoff dump as the last resort."
     )
 
 

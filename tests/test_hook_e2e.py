@@ -40,6 +40,7 @@ class HookE2ETest(unittest.TestCase):
             "handoff_root": str(self.state_root),
         }), encoding="utf-8")
         self.env = dict(os.environ)
+        self.env["HANDOFF_NO_POPUP"] = "1"  # 测试不弹真框（避免卡等用户点确定）
         self.env["CODEX_HANDOFF_CONFIG"] = str(self.config)
 
     def tearDown(self):
@@ -150,6 +151,7 @@ class HardPauseE2ETest(unittest.TestCase):
             "handoff_root": str(self.state_root),
         }), encoding="utf-8")
         self.env = dict(os.environ)
+        self.env["HANDOFF_NO_POPUP"] = "1"  # 测试不弹真框（避免卡等用户点确定）
         self.env["CODEX_HANDOFF_CONFIG"] = str(self.config)
 
     def tearDown(self):
@@ -282,6 +284,7 @@ class HardPauseCooldownE2ETest(unittest.TestCase):
             "handoff_root": str(self.state_root),
         }), encoding="utf-8")
         self.env = dict(os.environ)
+        self.env["HANDOFF_NO_POPUP"] = "1"  # 测试不弹真框（避免卡等用户点确定）
         self.env["CODEX_HANDOFF_CONFIG"] = str(self.config)
 
     def tearDown(self):
@@ -345,6 +348,7 @@ class PostCompactAmnesiaE2ETest(unittest.TestCase):
             "handoff_root": str(self.state_root),
         }), encoding="utf-8")
         self.env = dict(os.environ)
+        self.env["HANDOFF_NO_POPUP"] = "1"  # 测试不弹真框（避免卡等用户点确定）
         self.env["CODEX_HANDOFF_CONFIG"] = str(self.config)
 
     def tearDown(self):

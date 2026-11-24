@@ -94,6 +94,7 @@ class TestWorkBuddyHook(unittest.TestCase):
             "handoff_root": str(td / "handoffs"),
         }), encoding="utf-8")
         self.env = dict(os.environ)
+        self.env["HANDOFF_NO_POPUP"] = "1"  # 测试不弹真框（避免卡等用户点确定）
         self.env["WORKBUDDY_HOME"] = str(self.home)
         self.env["WORKBUDDY_DB"] = str(self.db)
 
@@ -110,15 +111,51 @@ class TestWorkBuddyHook(unittest.TestCase):
                 "hook_event_name": event,
                 "transcript_path": str(self.transcript), "prompt": prompt}
 
-    def test_hard_pause_emits_context_and_system_message(self):
-        make_db(self.db, [("wb-1", 1500, 0, 1)])
-        proc = self.run_hook(self.payload())
-        self.assertEqual(proc.returncode, 0)
-        out = json.loads(proc.stdout)
-        self.assertIn("交接阈值", out["hookSpecificOutput"]["additionalContext"])
-        self.assertIn("hand off", out["systemMessage"])
-        self.assertEqual(out["hookSpecificOutput"]["hookEventName"],
-                         "UserPromptSubmit")
+    def test_hard_pause_uses_native_popup_by_default(self):
+        """2026-11-24：实测 ctypes MessageBox 在 hook 独立进程里能弹到
+        用户桌面（截图验证），比 exit 2 好——不拦截输入、样式可控。
+        默认走真弹窗，exit 0；测试用 mock 避免真弹窗卡住 CI。"""
+        mod_path = str(ROOT / "plugins/workbuddy-context-handoff/scripts")
+        script = f'''
+import sys, json
+sys.path.insert(0, {mod_path!r})
+import context_check as cc
+calls = []
+cc.lib.native_notify = lambda title, body: calls.append((title, body)) or True
+cc.lib.read_state = lambda cfg: {{"sessions": {{}}}}
+cc.lib.write_state = lambda cfg, st: None
+cfg = {{"enabled": True, "hard_block": True, "threshold_ratio": 0.5,
+       "handoff_root": "/tmp", "context_window_tokens": 1000,
+       "notify_session_label": False}}
+rc = cc.block_with_message("测试提醒", cfg)
+print(json.dumps({{"rc": rc, "calls": calls}}))
+'''
+        proc = subprocess.run([sys.executable, "-c", script],
+                              capture_output=True, text=True, timeout=30)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["rc"], 0)
+        self.assertEqual(len(data["calls"]), 1)
+        self.assertIn("测试提醒", data["calls"][0][1])
+
+    def test_hard_block_exit2_fallback(self):
+        """配置 hard_block_exit2=true 时强制走 exit 2 + stderr
+        （弹窗被宿主窗口遮挡时的兜底）。"""
+        mod_path = str(ROOT / "plugins/workbuddy-context-handoff/scripts")
+        script = f'''
+import sys, json
+sys.path.insert(0, {mod_path!r})
+import context_check as cc
+called = []
+cc.lib.native_notify = lambda t, b: called.append(1) or True
+rc = cc.block_with_message("测试拦截", {{"hard_block_exit2": True}})
+print(json.dumps({{"rc": rc, "popup_called": bool(called)}}))
+'''
+        proc = subprocess.run([sys.executable, "-c", script],
+                              capture_output=True, text=True, timeout=30)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["rc"], 2)
+        self.assertFalse(data["popup_called"])
+        self.assertIn("测试拦截", proc.stderr)
 
     def test_window_cap_uses_db_size(self):
         # size=1000 -> effective threshold 750, used=800 -> threshold level
